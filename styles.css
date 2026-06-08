@@ -1,0 +1,204 @@
+/* styles.css — dark theme, white/gold labels, minimal SkyView-style UI */
+
+:root {
+  --gold: #ffd479;
+  --white: #f4f4f6;
+  --dim: #9aa0aa;
+  --bar-bg: rgba(8, 10, 16, 0.62);
+  --card-bg: rgba(14, 16, 24, 0.94);
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  background: #000;
+  color: var(--white);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+  overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* The sky canvas fills the screen */
+#sky {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;
+}
+
+/* ---------- Top persistent bar ---------- */
+#topbar {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  z-index: 30;
+  padding: calc(env(safe-area-inset-top) + 8px) 14px 10px;
+  background: var(--bar-bg);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  text-align: center;
+}
+#title {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: var(--white);
+}
+#status {
+  margin-top: 2px;
+  font-size: 12.5px;
+  color: var(--dim);
+}
+
+/* ---------- Bottom control dock ---------- */
+#dock {
+  position: fixed;
+  left: 0; right: 0;
+  bottom: 0;
+  z-index: 30;
+  padding: 10px 12px calc(env(safe-area-inset-bottom) + 10px);
+  background: var(--bar-bg);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+#searchRow { display: flex; gap: 8px; margin-bottom: 8px; }
+#searchInput {
+  flex: 1;
+  min-width: 0;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.14);
+  color: var(--white);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 15px;
+}
+#searchInput::placeholder { color: var(--dim); }
+
+button.ctl {
+  background: rgba(255,255,255,0.10);
+  border: 1px solid rgba(255,255,255,0.16);
+  color: var(--white);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 14px;
+  white-space: nowrap;
+}
+button.ctl:active { background: rgba(255,255,255,0.22); }
+button.ctl.on { background: var(--gold); color: #1a1304; border-color: var(--gold); }
+
+#timeRow { display: flex; align-items: center; gap: 10px; }
+#timeLabel { font-size: 12px; color: var(--dim); min-width: 118px; text-align: left; }
+#timeSlider { flex: 1; accent-color: var(--gold); }
+#btnRow { display: flex; gap: 8px; margin-top: 8px; }
+#btnRow button { flex: 1; }
+
+/* ---------- Search results dropdown ---------- */
+#results {
+  position: absolute;
+  left: 0; right: 0;
+  bottom: 100%;
+  margin-bottom: 6px;
+  background: var(--card-bg);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 12px;
+  max-height: 40vh;
+  overflow-y: auto;
+  display: none;
+}
+#results .row {
+  padding: 11px 14px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  font-size: 15px;
+  cursor: pointer;
+}
+#results .row:last-child { border-bottom: none; }
+#results .row small { color: var(--dim); }
+
+/* ---------- Info card ---------- */
+#card {
+  position: fixed;
+  z-index: 40;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(86vw, 360px);
+  background: var(--card-bg);
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 16px;
+  padding: 16px 18px;
+  box-shadow: 0 18px 50px rgba(0,0,0,0.6);
+  display: none;
+}
+#card h2 { margin: 0 0 2px; font-size: 20px; color: var(--gold); }
+#card .type { color: var(--dim); font-size: 13px; margin-bottom: 10px; }
+#card .grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 14px; }
+#card .grid .k { color: var(--dim); }
+#card .fact { margin-top: 12px; font-size: 13.5px; line-height: 1.4; color: #d7dae2; }
+#card .close {
+  position: absolute; top: 8px; right: 10px;
+  background: none; border: none; color: var(--dim); font-size: 24px; line-height: 1;
+}
+
+/* ---------- Center crosshair (where the phone points) ---------- */
+#crosshair {
+  position: fixed; z-index: 20;
+  left: 50%; top: 50%;
+  width: 36px; height: 36px;
+  margin: -18px 0 0 -18px;
+  border: 1px solid rgba(255,255,255,0.35);
+  border-radius: 50%;
+  pointer-events: none;
+}
+#crosshair::before, #crosshair::after {
+  content: ""; position: absolute; background: rgba(255,255,255,0.35);
+}
+#crosshair::before { left: 50%; top: -8px; width: 1px; height: 8px; }
+#crosshair::after  { top: 50%; left: -8px; height: 1px; width: 8px; }
+
+/* ---------- Start / permission overlay ---------- */
+#startOverlay {
+  position: fixed; inset: 0; z-index: 100;
+  background: radial-gradient(ellipse at 50% 30%, #0b1020 0%, #000 70%);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  text-align: center; padding: 28px;
+}
+#startOverlay h1 { font-size: 26px; margin: 0 0 6px; color: var(--white); }
+#startOverlay p { color: var(--dim); font-size: 15px; max-width: 320px; line-height: 1.5; }
+#startBtn {
+  margin-top: 22px;
+  background: var(--gold); color: #1a1304; border: none;
+  font-size: 17px; font-weight: 600;
+  padding: 14px 28px; border-radius: 14px;
+}
+#startNote { margin-top: 16px; font-size: 12px; color: #6b7080; max-width: 300px; }
+
+/* ---------- "Point your phone" hint ---------- */
+#orientHint {
+  position: fixed; z-index: 25;
+  bottom: calc(env(safe-area-inset-bottom) + 140px);
+  left: 50%; transform: translateX(-50%);
+  pointer-events: none;
+  animation: hintFade 1.4s ease-in-out infinite alternate;
+}
+#orientHintInner {
+  background: rgba(12, 14, 22, 0.78);
+  border: 1px solid rgba(255,255,255,0.18);
+  border-radius: 22px;
+  padding: 9px 18px;
+  font-size: 14px;
+  color: var(--white);
+  white-space: nowrap;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+@keyframes hintFade { from { opacity: 0.5; } to { opacity: 1; } }
+
+.hidden { display: none !important; }

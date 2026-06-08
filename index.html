@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <!-- viewport-fit=cover lets us draw under the iPhone notch/home bar -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#000000" />
+
+  <!-- Make it open fullscreen ("native-like") when added to the Home Screen on iOS -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="The Monkey Tree" />
+  <link rel="apple-touch-icon" href="icon-180.png" />
+
+  <title>The Monkey Tree</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- The live sky -->
+  <canvas id="sky"></canvas>
+  <div id="crosshair"></div>
+
+  <!-- Persistent top bar -->
+  <header id="topbar">
+    <div id="title">Live from the Monkey Tree</div>
+    <div id="status">📍 Locating…</div>
+  </header>
+
+  <!-- Bottom controls -->
+  <footer id="dock">
+    <div id="searchRow" style="position:relative">
+      <div id="results"></div>
+      <input id="searchInput" type="search" placeholder="Search a star, planet, the Moon…" autocomplete="off" />
+      <button class="ctl" id="searchClear">Clear</button>
+    </div>
+
+    <div id="timeRow">
+      <span id="timeLabel">Live</span>
+      <input id="timeSlider" type="range" min="-720" max="720" step="1" value="0" />
+    </div>
+
+    <div id="btnRow">
+      <button class="ctl" id="btnLive">● Live</button>
+      <button class="ctl on" id="btnConst">Lines</button>
+      <button class="ctl on" id="btnLabels">Labels</button>
+      <button class="ctl" id="btnRecenter">Recenter</button>
+    </div>
+  </footer>
+
+  <!-- "Point your phone at the sky" hint — shown briefly after Begin until compass fires -->
+  <div id="orientHint">
+    <div id="orientHintInner">☝️ Point your phone at the sky</div>
+  </div>
+
+  <!-- Tap info card -->
+  <div id="card">
+    <button class="close" id="cardClose">×</button>
+    <h2 id="cardName"></h2>
+    <div class="type" id="cardType"></div>
+    <div class="grid" id="cardGrid"></div>
+    <div class="fact" id="cardFact"></div>
+  </div>
+
+  <!-- Start overlay (iOS requires a tap before granting motion/compass) -->
+  <div id="startOverlay">
+    <h1>The Monkey Tree</h1>
+    <p>A live view of the sky from the Monkey Tree in Annapolis. Hold your phone up to the sky and tap objects to learn about them.</p>
+    <button id="startBtn">Tap to Begin</button>
+    <div id="startNote">We’ll ask for motion &amp; location access. Location is only used to show whether you’re home — the sky always shows the view from the Monkey Tree.</div>
+  </div>
+
+  <!-- Astronomy engine (very accurate, MIT, no key). satellite.js for ISS/satellites. -->
+  <script src="https://cdn.jsdelivr.net/npm/astronomy-engine@2.1.19/astronomy.browser.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/satellite.js@5.0.0/dist/satellite.min.js"></script>
+
+  <!-- Our data + app -->
+  <script src="stars.js"></script>
+  <script src="constellations.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
