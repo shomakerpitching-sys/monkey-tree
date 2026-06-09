@@ -24,8 +24,11 @@
 
   <!-- Persistent top bar -->
   <header id="topbar">
-    <div id="title">Live from the Monkey Tree</div>
+    <div id="title">Live from Amanda's Monkey Tree</div>
+    <div id="greeting"></div>
     <div id="status">📍 Locating…</div>
+    <div id="awayMsg">Come home, the Monkeys miss you</div>
+    <div id="moonLine"></div>
   </header>
 
   <!-- Bottom controls -->
@@ -61,6 +64,12 @@
     <div class="type" id="cardType"></div>
     <div class="grid" id="cardGrid"></div>
     <div class="fact" id="cardFact"></div>
+  </div>
+
+  <!-- Easter egg: revealed AFTER Begin is pressed; ghosts over the live sky for 2s -->
+  <div id="introOverlay" class="hidden">
+    <img id="introImg" src="It_s_Kouri_Bitch.jpg" alt="" />
+    <div id="introText">It's Kouri Bitch</div>
   </div>
 
   <!-- Start overlay (iOS requires a tap before granting motion/compass) -->

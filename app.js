@@ -23,9 +23,13 @@ const RAD = 180 / Math.PI;
 
 /* ===================== STATE ===================== */
 const state = {
-  heading: 0,       // compass azimuth, degrees (0=N, 90=E)
-  pitch: 0,         // up/down tilt, degrees (0=horizon, +90=straight up)
-  roll: 0,          // screen rotation, degrees
+  // Camera orientation is now stored as a full 3D basis (three world-space unit
+  // vectors in East-North-Up coords), derived from the device rotation matrix.
+  // This replaces the old heading/pitch/roll Euler angles, which couldn't
+  // represent tilted poses correctly and made the horizon "tip over".
+  camForward: { x: 0, y: 1, z: 0 }, // where the camera looks (default: north horizon)
+  camRight:   { x: 1, y: 0, z: 0 }, // screen-right direction in the world
+  camUp:      { x: 0, y: 0, z: 1 }, // screen-up direction in the world
 
   fov: 65,          // vertical field of view in degrees
   timeOffsetMin: 0, // time scrubber offset in minutes (0 = live)
@@ -43,8 +47,14 @@ let manualLook = null;
 /* ===================== DOM ===================== */
 const canvas = document.getElementById("sky");
 const ctx = canvas.getContext("2d");
-const statusEl = document.getElementById("status");
+const statusEl   = document.getElementById("status");
+const titleEl    = document.getElementById("title");     // Change 1: dynamic header text
+const greetingEl = document.getElementById("greeting");  // Change 2: time-aware greeting
+const awayMsgEl  = document.getElementById("awayMsg");   // Change 3: "Come home" line
+const moonLineEl = document.getElementById("moonLine");  // Change 4: moon info
+const dockEl     = document.getElementById("dock");      // bottom control dock
 let W = 0, H = 0, DPR = 1;
+let dockHeight = 150; // height of the bottom dock, so the railing sits just above it
 
 function resize() {
   DPR = Math.min(window.devicePixelRatio || 1, 2.5);
@@ -55,6 +65,7 @@ function resize() {
   canvas.style.width = W + "px";
   canvas.style.height = H + "px";
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  dockHeight = (dockEl && dockEl.offsetHeight) || 150;
 }
 window.addEventListener("resize", resize);
 resize();
@@ -124,52 +135,42 @@ function refreshSlowCache(date) {
   }
 }
 
-/* ===================== PROJECTION ===================== */
-function project(az, alt) {
-  const ch = state.heading, cp = state.pitch;
+/* ===================== PROJECTION =====================
+ * Projects a sky direction (azimuth/altitude) onto the screen using the camera
+ * basis in `state`. Roll is built into the basis, so there's no separate 2D
+ * rotation and no zenith gimbal special-case any more.
+ * allowOffscreen=true keeps points that fall just outside the screen (needed so
+ * the horizon line and the foreground silhouette stay continuous at the edges).
+ */
+function project(az, alt, allowOffscreen) {
   const ta = az * DEG, te = alt * DEG;
   const tv = {
     x: Math.cos(te) * Math.sin(ta),
     y: Math.cos(te) * Math.cos(ta),
     z: Math.sin(te)
   };
-  const fa = ch * DEG, fe = cp * DEG;
-  const fwd = {
-    x: Math.cos(fe) * Math.sin(fa),
-    y: Math.cos(fe) * Math.cos(fa),
-    z: Math.sin(fe)
-  };
-  const up0 = { x: 0, y: 0, z: 1 };
-  let right = cross(fwd, up0);
-  if (norm(right) < 1e-6) right = { x: 1, y: 0, z: 0 };
-  right = normalize(right);
-  const up = normalize(cross(right, fwd));
+  const xCam = dot(tv, state.camRight);
+  const yCam = dot(tv, state.camUp);
+  const zCam = dot(tv, state.camForward);
 
-  const xCam = dot(tv, right);
-  const yCam = dot(tv, up);
-  const zCam = dot(tv, fwd);
-
-  if (zCam <= 0.04) return null;
+  if (zCam <= 0.04) return null; // behind the camera
 
   const f = (H / 2) / Math.tan((state.fov * DEG) / 2);
-  let px = W / 2 + (xCam / zCam) * f;
-  let py = H / 2 - (yCam / zCam) * f;
+  const px = W / 2 + (xCam / zCam) * f;
+  const py = H / 2 - (yCam / zCam) * f;
 
-  if (state.roll) {
-    const r = -state.roll * DEG;
-    const dx = px - W / 2, dy = py - H / 2;
-    px = W / 2 + dx * Math.cos(r) - dy * Math.sin(r);
-    py = H / 2 + dx * Math.sin(r) + dy * Math.cos(r);
-  }
-
-  if (px < -80 || px > W + 80 || py < -80 || py > H + 80) return null;
+  if (!allowOffscreen && (px < -80 || px > W + 80 || py < -80 || py > H + 80)) return null;
   return { x: px, y: py, depth: zCam };
 }
 
+/* ---- Vector helpers ---- */
 function cross(a, b) { return { x: a.y*b.z - a.z*b.y, y: a.z*b.x - a.x*b.z, z: a.x*b.y - a.y*b.x }; }
 function dot(a, b)   { return a.x*b.x + a.y*b.y + a.z*b.z; }
 function norm(a)     { return Math.sqrt(dot(a, a)); }
 function normalize(a){ const n = norm(a) || 1; return { x: a.x/n, y: a.y/n, z: a.z/n }; }
+function addVec(a, b){ return { x: a.x+b.x, y: a.y+b.y, z: a.z+b.z }; }
+function scaleVec(a, s){ return { x: a.x*s, y: a.y*s, z: a.z*s }; }
+function lerpVec(a, b, k){ return { x: a.x+(b.x-a.x)*k, y: a.y+(b.y-a.y)*k, z: a.z+(b.z-a.z)*k }; }
 
 function starRadius(mag) {
   const r = 2.6 - mag * 0.42;
@@ -192,13 +193,15 @@ function render() {
   // Refresh the slow cache (no-ops most frames; only recomputes every 20s)
   refreshSlowCache(date);
 
+  drawHorizonGlow(); // soft glow at the horizon so the tree silhouette reads
   drawMilkyWay();
   if (state.showLines) drawConstellations();
   drawStars();
   drawPlanets(date);
   drawMoonAndSun(date);
   drawSatellites(date);
-  drawHorizon();
+  drawForeground(); // tree silhouette (east-anchored) — drawn over low objects
+  drawHorizon();    // horizon line + cardinal letters stay readable on top
 
   requestAnimationFrame(render);
 }
@@ -396,7 +399,7 @@ function drawHorizon() {
   ctx.beginPath();
   let started = false;
   for (let az = 0; az <= 360; az += 2) {
-    const p = project(az, 0);
+    const p = project(az, 0, true); // allowOffscreen → continuous line at edges
     if (!p) { started = false; continue; }
     if (!started) { ctx.moveTo(p.x, p.y); started = true; }
     else ctx.lineTo(p.x, p.y);
@@ -408,6 +411,144 @@ function drawHorizon() {
     const p = project(az, 0);
     if (p) label(p.x, p.y - 4, name, "rgba(150,170,200,0.8)", 12, true);
   }
+}
+
+/* ===================== FOREGROUND (Option A overlay) =====================
+ * A world-locked silhouette of Amanda's actual view: the real treeline anchored
+ * due EAST (azimuth 90°) — two tree masses framing a low gap over the water —
+ * cross-fading to a soft generic treeline in every other direction. Plus the
+ * lit balcony railing along the bottom (you're behind it whichever way you face).
+ */
+const EAST_AZ = 90; // the balcony faces due east
+
+// Silhouette top altitude (degrees) for a given azimuth.
+function horizonTopAlt(az) {
+  // Gentle generic treeline everywhere (≈1.5°–3.5°, slowly undulating).
+  const generic = 2.5 + 1.1 * Math.sin(az * DEG * 3 + 0.7);
+
+  // Distance from due east, wrapped to [-180,180].
+  let d = ((az - EAST_AZ + 540) % 360) - 180;
+  const ad = Math.abs(d);
+  if (ad > 60) return generic; // outside the east view → just the generic ridge
+
+  // The real view: tall trees on both sides, low far-shore treeline in the gap.
+  let treeTop;
+  if (ad < 12) {
+    treeTop = 4.5 + 1.5 * Math.cos(d * DEG * 6);        // central gap over the water
+  } else if (ad < 50) {
+    const t = (ad - 12) / 38;                            // 0→1 across the tree mass
+    treeTop = 5 + 27 * Math.sin(Math.min(1, t) * Math.PI * 0.92); // rises to ~30°
+  } else {
+    treeTop = 6;
+  }
+
+  // Blend the tree mass back into the generic ridge between 45°–60° off east.
+  if (ad > 45) {
+    const bld = (ad - 45) / 15;
+    return treeTop * (1 - bld) + generic * bld;
+  }
+  return Math.max(treeTop, generic);
+}
+
+// Soft glow hugging the horizon: dim & cool most places, warmer toward the east
+// (the marina's lights). Drawn before the stars so the dark trees sit against it.
+function drawHorizonGlow() {
+  const step = 3;
+  for (let az = 0; az < 360; az += step) {
+    const top  = project(az,        14, true);
+    const top2 = project(az + step, 14, true);
+    const bot  = project(az,        -2, true);
+    const bot2 = project(az + step, -2, true);
+    if (!top || !top2 || !bot || !bot2) continue;
+
+    let d = ((az - EAST_AZ + 540) % 360) - 180;
+    const warm = Math.max(0, 1 - Math.abs(d) / 70); // 1 at east → 0 by 70° away
+    const r = Math.round(58 + warm * 46);
+    const g = Math.round(68 + warm * 22);
+    const b = Math.round(96 - warm * 34);
+    const aHor = (0.24 + warm * 0.12).toFixed(3);
+
+    const grad = ctx.createLinearGradient(bot.x, bot.y, top.x, top.y);
+    grad.addColorStop(0, `rgba(${r},${g},${b},${aHor})`);
+    grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(top.x, top.y);
+    ctx.lineTo(top2.x, top2.y);
+    ctx.lineTo(bot2.x, bot2.y);
+    ctx.lineTo(bot.x, bot.y);
+    ctx.closePath();
+    ctx.fill();
+  }
+}
+
+function drawForeground() {
+  // --- World-locked tree silhouette (pure near-black against the horizon glow) ---
+  const step = 1.5;
+  ctx.fillStyle = "#020308";
+  for (let az = 0; az < 360; az += step) {
+    const pTL = project(az,        horizonTopAlt(az),        true);
+    const pTR = project(az + step, horizonTopAlt(az + step), true);
+    const pBL = project(az,        -25, true);
+    const pBR = project(az + step, -25, true);
+    if (!pTL || !pTR || !pBL || !pBR) continue; // column behind camera → skip
+    ctx.beginPath();
+    ctx.moveTo(pTL.x, pTL.y);
+    ctx.lineTo(pTR.x, pTR.y);
+    ctx.lineTo(pBR.x, pBR.y);
+    ctx.lineTo(pBL.x, pBL.y);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Faint rim along the treeline top so the edge stays crisp against the glow.
+  ctx.strokeStyle = "rgba(90,110,140,0.30)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  let started = false;
+  for (let az = 0; az <= 360; az += step) {
+    const p = project(az, horizonTopAlt(az), true);
+    if (!p) { started = false; continue; }
+    if (!started) { ctx.moveTo(p.x, p.y); started = true; }
+    else ctx.lineTo(p.x, p.y);
+  }
+  ctx.stroke();
+
+  drawRailing();
+}
+
+// Screen-locked lit railing along the bottom — fades out as you look upward.
+function drawRailing() {
+  const elev = Math.asin(Math.max(-1, Math.min(1, state.camForward.z))) * RAD;
+  let a = elev < 0 ? 1 : 1 - elev / 26; // full at/below horizon, gone by ~26° up
+  a = Math.max(0, Math.min(1, a));
+  if (a <= 0.02) return;
+
+  ctx.save();
+  ctx.globalAlpha = a;
+
+  const topY = H - dockHeight - 16;    // sit just above the control dock so it's visible
+  // Top rail
+  ctx.strokeStyle = "rgba(22,26,34,0.96)";
+  ctx.lineWidth = 9;
+  ctx.beginPath(); ctx.moveTo(0, topY); ctx.lineTo(W, topY); ctx.stroke();
+
+  // Balusters + warm glowing post caps
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = "rgba(18,22,30,0.96)";
+  const spacing = 30;
+  const n = Math.ceil(W / spacing);
+  const offset = (W - n * spacing) / 2;
+  for (let i = 0; i <= n; i++) {
+    const x = offset + i * spacing;
+    ctx.beginPath(); ctx.moveTo(x, topY); ctx.lineTo(x, H); ctx.stroke();
+    const cap = ctx.createRadialGradient(x, topY - 2, 0, x, topY - 2, 8);
+    cap.addColorStop(0, "rgba(255,206,130,0.95)");
+    cap.addColorStop(1, "rgba(255,206,130,0)");
+    ctx.fillStyle = cap;
+    ctx.beginPath(); ctx.arc(x, topY - 2, 8, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
 }
 
 /* ---- Label helper ---- */
@@ -427,38 +568,90 @@ function label(x, y, text, color, size, center) {
 let _firstOrientationAt = Infinity;
 
 function handleOrientation(e) {
-  // FIX #1: Honour the manual-look freeze set by centerOn().
-  // If the user just searched for an object, ignore compass input for 6 seconds
-  // so the view actually stays pointed where centerOn() put it.
+  // Honour the manual-look freeze set by centerOn() (search "center on").
   if (manualLook && Date.now() < manualLook.until) return;
-  manualLook = null; // freeze expired — sensors take over again
+  manualLook = null;
 
-  let heading;
+  // --- Yaw reference ---
+  // iOS gives webkitCompassHeading (true-north, clockwise). The W3C alpha angle
+  // has an arbitrary zero, so on iOS we replace alpha with the compass-derived
+  // value (alpha increases counter-clockwise, hence 360 - heading).
+  let alphaDeg;
   if (typeof e.webkitCompassHeading === "number" && !isNaN(e.webkitCompassHeading)) {
-    heading = e.webkitCompassHeading;
+    alphaDeg = 360 - e.webkitCompassHeading;
   } else if (e.alpha != null) {
-    heading = (360 - e.alpha) % 360;
+    alphaDeg = e.alpha; // non-iOS fallback (relative heading)
   } else {
     return;
   }
+  const betaDeg  = e.beta  || 0;
+  const gammaDeg = e.gamma || 0;
 
-  const beta  = e.beta  || 0;
-  const gamma = e.gamma || 0;
+  // Build the target camera basis from the full device rotation matrix.
+  const target = basisFromOrientation(alphaDeg, betaDeg, gammaDeg, screenAngleDeg());
 
-  let pitch = 90 - beta;
-  pitch = Math.max(-90, Math.min(90, pitch));
+  // Smooth the orientation as ONE unit (lerp the vectors, then re-orthonormalise)
+  // instead of filtering three coupled Euler angles separately. k smaller = steadier
+  // but slightly laggier; 0.16 is a calm, jitter-free feel.
+  const k = 0.16;
+  const f = normalize(lerpVec(state.camForward, target.f, k));
+  let   r = normalize(lerpVec(state.camRight,   target.r, k));
+  const u = normalize(cross(r, f));   // up   = right × forward
+  r       = normalize(cross(f, u));   // right = forward × up (re-orthogonalise)
+  state.camForward = f;
+  state.camRight   = r;
+  state.camUp      = u;
 
-  state.heading = smoothAngle(state.heading, heading, 0.25);
-  state.pitch   = state.pitch + (pitch - state.pitch) * 0.25;
-  state.roll    = state.roll  + (gamma - state.roll)  * 0.2;
-
-  // Record when the first real compass reading arrived so the hint can be cleared.
   if (_firstOrientationAt === Infinity) _firstOrientationAt = Date.now();
 }
 
-function smoothAngle(cur, target, k) {
-  let d = ((target - cur + 540) % 360) - 180;
-  return (cur + d * k + 360) % 360;
+// Current screen rotation in degrees (0 portrait, 90/270 landscape, 180 upside down).
+function screenAngleDeg() {
+  if (screen.orientation && typeof screen.orientation.angle === "number") return screen.orientation.angle;
+  if (typeof window.orientation === "number") return window.orientation;
+  return 0;
+}
+
+/* Build a camera basis (forward/right/up, world East-North-Up) from the device
+ * orientation. Uses the W3C Z-X'-Y'' rotation matrix. The camera looks out the
+ * BACK of the phone (aim/camera style), so you point the phone at a star like a
+ * viewfinder. Verified: phone vertical facing north → looks north, up = zenith. */
+function basisFromOrientation(alphaDeg, betaDeg, gammaDeg, orientDeg) {
+  const a = alphaDeg * DEG, b = betaDeg * DEG, g = gammaDeg * DEG;
+  const ca = Math.cos(a), sa = Math.sin(a);
+  const cb = Math.cos(b), sb = Math.sin(b);
+  const cg = Math.cos(g), sg = Math.sin(g);
+
+  // R maps device axes -> world (X=East, Y=North, Z=Up)
+  const R00 = ca*cg - sa*sb*sg, R01 = -sa*cb, R02 = ca*sg + sa*sb*cg;
+  const R10 = sa*cg + ca*sb*sg, R11 =  ca*cb, R12 = sa*sg - ca*sb*cg;
+  const R20 = -cb*sg,           R21 =  sb,    R22 = cb*cg;
+
+  // Camera looks out the back = device -Z; screen-right = device +X; screen-up = device +Y
+  let f = { x: -R02, y: -R12, z: -R22 };
+  let r = { x:  R00, y:  R10, z:  R20 };
+  let u = { x:  R01, y:  R11, z:  R21 };
+
+  // Compensate for screen rotation (portrait→landscape) by rolling the basis
+  // about the view axis. No-op in portrait (orientDeg = 0).
+  if (orientDeg) {
+    const o = -orientDeg * DEG, c = Math.cos(o), s = Math.sin(o);
+    r = addVec(scaleVec(r, c), scaleVec(cross(f, r), s));
+    u = addVec(scaleVec(u, c), scaleVec(cross(f, u), s));
+  }
+  return { f: normalize(f), r: normalize(r), u: normalize(u) };
+}
+
+// Point the camera at a specific azimuth/altitude (used by search "center on").
+function setLookDirection(az, alt) {
+  const ta = az * DEG, te = alt * DEG;
+  const f = { x: Math.cos(te)*Math.sin(ta), y: Math.cos(te)*Math.cos(ta), z: Math.sin(te) };
+  let r = cross(f, { x: 0, y: 0, z: 1 });
+  if (norm(r) < 1e-6) r = { x: 1, y: 0, z: 0 };
+  r = normalize(r);
+  state.camForward = normalize(f);
+  state.camRight   = r;
+  state.camUp      = normalize(cross(r, f));
 }
 
 /* ===================== GEOFENCE (status only) ===================== */
@@ -484,7 +677,14 @@ function startGeofence() {
 }
 
 function setStatus(isHome) {
+  // Change 3: keep the existing 📍 status line exactly as before.
   statusEl.textContent = isHome ? "📍 Home" : "📍 Viewing from home";
+
+  // Change 1: header text depends on home/away.
+  titleEl.textContent = isHome ? "Amanda's Monkey Tree" : "Live from Amanda's Monkey Tree";
+
+  // Change 3: the "Come home" line appears ONLY when not home.
+  awayMsgEl.style.display = isHome ? "none" : "block";
 }
 
 /* ===================== SATELLITES LOAD ===================== */
@@ -624,6 +824,72 @@ function phaseName(deg) {
   return "Waning Crescent";
 }
 
+/* ===================== PERSONAL UI (Changes 2 & 4) =====================
+ * Greeting line + moon info. All time-based logic uses currentDate(), so it
+ * respects the time scrubber too. None of this touches the sky rendering.
+ */
+
+// Is there a full moon "tonight" (within ~18 hours of the given moment)?
+function fullMoonTonight(date) {
+  // Search from 24h before now so a full moon earlier today is still caught.
+  const start = new Date(date.getTime() - 24 * 3600000);
+  const fm = Astronomy.SearchMoonPhase(180, start, 3); // 180° = full moon
+  if (!fm) return false;
+  const diffHrs = Math.abs(fm.date.getTime() - date.getTime()) / 3600000;
+  return diffHrs <= 18;
+}
+
+// Change 4 easter egg: is a date within 3 calendar days of June 18 (year ignored)?
+function nearJune18(d) {
+  const y = d.getFullYear();
+  const thisDay = Date.UTC(y, d.getMonth(), d.getDate());
+  const june18  = Date.UTC(y, 5, 18); // month 5 = June
+  const diffDays = Math.round((thisDay - june18) / 86400000);
+  return Math.abs(diffDays) <= 3;
+}
+
+// Change 2: pick the right warm greeting for the current time / sky.
+function greetingFor(date) {
+  // Full moon takes priority over everything else.
+  if (fullMoonTonight(date)) return "There's a full moon tonight, Amanda";
+
+  const h = date.getHours();
+  if (h < 5) return "Still up, Amanda? The sky's all yours";
+
+  // Compute today's sunset at the home coordinates.
+  const dayStart = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0);
+  const sunset = Astronomy.SearchRiseSet("Sun", observer, -1, dayStart, 1);
+  if (sunset && date < sunset.date) return "Tonight's sky is getting ready for you, Amanda";
+  return "The stars are out, Amanda";
+}
+
+// Writes both the greeting and the moon info line. Cheap enough to call on a timer.
+function updatePersonalUI() {
+  const date = currentDate();
+
+  // --- Greeting (Change 2) ---
+  greetingEl.textContent = greetingFor(date);
+
+  // --- Moon info (Change 4) ---
+  const illum = Astronomy.Illumination("Moon", date);
+  const pct   = Math.round(illum.phase_fraction * 100);
+  const phase = phaseName(Astronomy.MoonPhase(date));
+
+  const fm = Astronomy.SearchMoonPhase(180, date, 40); // next full moon within ~40 days
+  let nextLine;
+  if (fm && nearJune18(fm.date)) {
+    nextLine = "Full moon near the day we met 🌕";
+  } else if (fm) {
+    nextLine = "Next full moon: " +
+      fm.date.toLocaleDateString([], { month: "short", day: "numeric" });
+  } else {
+    nextLine = "";
+  }
+
+  moonLineEl.innerHTML =
+    `🌙 ${phase} · ${pct}% lit<br><span class="moonNext">${nextLine}</span>`;
+}
+
 document.getElementById("cardClose").onclick = () => card.style.display = "none";
 
 /* ===================== TAP HIT TEST ===================== */
@@ -732,10 +998,9 @@ function centerOn(m) {
     return;
   }
 
-  // FIX #1: set the freeze window; handleOrientation() will respect it.
+  // Set the freeze window; handleOrientation() will respect it, then point the camera.
   manualLook = { az: altaz.az, alt: altaz.alt, until: Date.now() + 6000 };
-  state.heading = altaz.az;
-  state.pitch   = altaz.alt;
+  setLookDirection(altaz.az, altaz.alt);
 }
 
 /* FIX #2: flash() now saves the previous text and restores it after 2.5 s.
@@ -755,6 +1020,7 @@ slider.addEventListener("input", () => {
   // Force the slow cache to refresh immediately when time is scrubbed
   SLOW_CACHE.lastUpdate = 0;
   updateTimeLabel();
+  updatePersonalUI(); // greeting + moon line follow the scrubbed time too
 });
 
 function updateTimeLabel() {
@@ -827,8 +1093,14 @@ document.getElementById("startBtn").addEventListener("click", async () => {
     clearInterval(hintTimer);
   }, 300);
 
+  // Keep the greeting current as time passes (e.g. day → evening).
+  setInterval(updatePersonalUI, 30000);
+
   // Start the render loop NOW (not at page load) so it only runs when needed.
   render();
+
+  // Easter egg: ghost the faint Kouri image + text over the live sky for 2s.
+  playIntroEasterEgg();
 });
 
 /* ===================== SERVICE WORKER ===================== */
@@ -843,3 +1115,18 @@ if ("serviceWorker" in navigator) {
 // The render loop itself starts inside the startBtn click handler — not here —
 // so no CPU is used until the user taps Begin.
 updateTimeLabel();
+updatePersonalUI(); // populate greeting + moon line right away (visible behind overlay)
+
+/* ===================== INTRO EASTER EGG =====================
+ * Plays AFTER the Begin button is pressed (called from the start handler): the
+ * faint (10%) Kouri image + text ghosts over the LIVE sky for 2 seconds, then
+ * fades out and is removed completely so it never blocks taps. */
+function playIntroEasterEgg() {
+  const intro = document.getElementById("introOverlay");
+  if (!intro) return;
+  intro.classList.remove("hidden");              // reveal it over the live sky
+  setTimeout(() => {
+    intro.classList.add("introHide");            // start the 0.6s CSS fade
+    setTimeout(() => { intro.remove(); }, 700);   // remove from the page after it fades
+  }, 2000);
+}
