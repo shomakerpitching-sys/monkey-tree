@@ -2,7 +2,7 @@
  * Caches the app shell so the sky/planet/star features work offline.
  * (Live satellite passes still need a connection — that's expected.)
  */
-const CACHE = "monkey-tree-v5";
+const CACHE = "monkey-tree-v6";
 const ASSETS = [
   "./",
   "./index.html",
@@ -38,18 +38,44 @@ self.addEventListener("activate", (e) => {
 });
 
 self.addEventListener("fetch", (e) => {
-  const url = e.request.url;
+  const req = e.request;
+  if (req.method !== "GET") return;
+  const url = req.url;
+
   // Never cache the live satellite data — always go to network.
   if (url.includes("celestrak.org")) {
-    e.respondWith(fetch(e.request).catch(() => new Response("", { status: 504 })));
+    e.respondWith(fetch(req).catch(() => new Response("", { status: 504 })));
     return;
   }
-  // Cache-first for everything else (the app shell + libraries).
+
+  // Page loads (navigations): NETWORK-FIRST so the HTML is always fresh.
+  // This is the key fix — it stops a stale/404 page from being served from cache.
+  // Falls back to the cached page only when truly offline.
+  if (req.mode === "navigate") {
+    e.respondWith(
+      fetch(req)
+        .then((res) => {
+          if (res && res.ok) {
+            const copy = res.clone();
+            caches.open(CACHE).then((c) => c.put("./index.html", copy)).catch(() => {});
+          }
+          return res;
+        })
+        .catch(() => caches.match(req).then((h) => h || caches.match("./index.html")))
+    );
+    return;
+  }
+
+  // Other assets: cache-first, but ONLY ever store successful (200/ok) responses,
+  // so an error like a 404 can never get cached and stuck.
   e.respondWith(
-    caches.match(e.request).then((hit) =>
-      hit || fetch(e.request).then((res) => {
-        const copy = res.clone();
-        caches.open(CACHE).then((c) => c.put(e.request, copy)).catch(() => {});
+    caches.match(req).then((hit) =>
+      hit ||
+      fetch(req).then((res) => {
+        if (res && res.ok) {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
+        }
         return res;
       }).catch(() => hit)
     )
