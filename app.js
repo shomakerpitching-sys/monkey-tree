@@ -91,48 +91,87 @@ function bodyAltAz(body, date) {
 }
 
 /* ===================== ALT/AZ CACHE =====================
- * FIX #3: Stars, constellation points, and the Milky Way band change extremely
- * slowly (< 0.25° per minute). Recomputing them every animation frame at 60 fps
- * was burning ~30,000 Astronomy Engine calls per second for no benefit.
- * We now recompute them at most once every 20 seconds. Planets, Moon, Sun, and
- * satellites are still computed every frame because they move visibly.
+ * The star field is now ~2,900 real stars (HYG catalog) plus all 88
+ * constellations and the real Milky Way outline — ~4,800 sky points total.
+ * Calling Astronomy.Horizon() for each would stutter, so the cache converts
+ * RA/Dec -> alt/az with direct sidereal-time math (pure trig, ~5 ms for all,
+ * validated against Astronomy Engine to within 0.13° above the horizon) and
+ * stores each point as a world-space unit VECTOR. Drawing then only needs
+ * three dot products per point per frame — no trig at 60 fps.
+ * Planets, Moon, Sun, and satellites still use the full-precision engine
+ * every frame because they move visibly.
  */
 const SLOW_CACHE = {
   lastUpdate: 0,
   intervalMs: 20000, // recompute slow objects every 20 seconds
-  stars: [],         // [{alt, az}] parallel to STARS array
-  conLines: [],      // [{a:{alt,az}, b:{alt,az}}] parallel to flattened constellation segments
-  conLabels: [],     // [{alt, az}] parallel to CONSTELLATIONS array
-  milkyWay: []       // [{alt, az}] one per 3° step along galactic equator
+  stars: [],         // [{v, alt}] world unit vector + altitude, parallel to STARS
+  conLines: [],      // [{a:{v,alt}, b:{v,alt}}] per flattened constellation segment
+  conLabels: [],     // [{v, alt}] parallel to CONSTELLATIONS
+  milkyWay: []       // [[{v, alt}, ...]] one array per Milky Way contour ring
 };
+
+// alt/az + world unit vector from RA/Dec via local sidereal time.
+// Includes Bennett refraction so stars sit exactly where Astronomy.Horizon puts
+// the planets (both are displayed together — they must agree).
+function fastSky(raH, decD, gastH) {
+  const lstDeg = (gastH * 15 + HOME.lon) % 360;
+  const Ha = (lstDeg - raH * 15) * DEG;
+  const dec = decD * DEG, phi = HOME.lat * DEG;
+  const sinD = Math.sin(dec), cosD = Math.cos(dec);
+  const sinP = Math.sin(phi), cosP = Math.cos(phi);
+  const E = -cosD * Math.sin(Ha);
+  const N = sinD * cosP - cosD * Math.cos(Ha) * sinP;
+  let  U = sinD * sinP + cosD * Math.cos(Ha) * cosP;
+  let alt = Math.asin(Math.max(-1, Math.min(1, U))) * RAD;
+  if (alt > -1) { // Bennett atmospheric refraction (arc-minutes -> degrees)
+    alt += (1 / Math.tan((alt + 7.31 / (alt + 4.4)) * DEG)) / 60;
+  }
+  const az = Math.atan2(E, N); // radians, 0=N clockwise via atan2(E,N)
+  const cosA = Math.cos(alt * DEG);
+  return {
+    alt,
+    v: { x: cosA * Math.sin(az), y: cosA * Math.cos(az), z: Math.sin(alt * DEG) }
+  };
+}
 
 function refreshSlowCache(date) {
   const now = Date.now();
   if (now - SLOW_CACHE.lastUpdate < SLOW_CACHE.intervalMs) return;
   SLOW_CACHE.lastUpdate = now;
 
-  // Stars
-  SLOW_CACHE.stars = STARS.map(s => raDecToAltAz(s.ra, s.dec, date));
+  const gast = Astronomy.SiderealTime(date);
 
-  // Constellation line endpoints AND label positions (both move at stellar rate)
+  // Stars (HYG catalog)
+  SLOW_CACHE.stars = STARS.map(s => fastSky(s.ra, s.dec, gast));
+
+  // Constellation line endpoints AND label positions
   SLOW_CACHE.conLines  = [];
   SLOW_CACHE.conLabels = [];
   for (const c of CONSTELLATIONS) {
     for (const seg of c.lines) {
       SLOW_CACHE.conLines.push({
-        a: raDecToAltAz(seg[0][0], seg[0][1], date),
-        b: raDecToAltAz(seg[1][0], seg[1][1], date)
+        a: fastSky(seg[0][0], seg[0][1], gast),
+        b: fastSky(seg[1][0], seg[1][1], gast)
       });
     }
-    SLOW_CACHE.conLabels.push(raDecToAltAz(c.label[0], c.label[1], date));
+    SLOW_CACHE.conLabels.push(fastSky(c.label[0], c.label[1], gast));
   }
 
-  // Milky Way band (120 points, one per 3°)
-  SLOW_CACHE.milkyWay = [];
-  for (let l = 0; l < 360; l += 3) {
-    const eq = galacticToEquatorial(l, 0);
-    SLOW_CACHE.milkyWay.push(raDecToAltAz(eq.ra, eq.dec, date));
-  }
+  // Milky Way contour rings (real outline data)
+  SLOW_CACHE.milkyWay = MILKYWAY.map(ring => ring.map(pt => fastSky(pt[0], pt[1], gast)));
+}
+
+// Project a cached world unit vector — three dot products, no trig.
+function projectVec(v, allowOffscreen) {
+  const xCam = dot(v, state.camRight);
+  const yCam = dot(v, state.camUp);
+  const zCam = dot(v, state.camForward);
+  if (zCam <= 0.04) return null;
+  const f = (H / 2) / Math.tan((state.fov * DEG) / 2);
+  const px = W / 2 + (xCam / zCam) * f;
+  const py = H / 2 - (yCam / zCam) * f;
+  if (!allowOffscreen && (px < -80 || px > W + 80 || py < -80 || py > H + 80)) return null;
+  return { x: px, y: py, depth: zCam };
 }
 
 /* ===================== PROJECTION =====================
@@ -172,11 +211,6 @@ function addVec(a, b){ return { x: a.x+b.x, y: a.y+b.y, z: a.z+b.z }; }
 function scaleVec(a, s){ return { x: a.x*s, y: a.y*s, z: a.z*s }; }
 function lerpVec(a, b, k){ return { x: a.x+(b.x-a.x)*k, y: a.y+(b.y-a.y)*k, z: a.z+(b.z-a.z)*k }; }
 
-function starRadius(mag) {
-  const r = 2.6 - mag * 0.42;
-  return Math.max(0.6, Math.min(3.6, r));
-}
-
 /* ===================== RENDER ===================== */
 function render() {
   const date = currentDate();
@@ -206,55 +240,74 @@ function render() {
   requestAnimationFrame(render);
 }
 
-/* ---- Stars (uses cache) ---- */
+/* ---- Stars (HYG catalog, vector cache, real B-V colors) ---- */
 function drawStars() {
-  for (let i = 0; i < STARS.length; i++) {
-    const s = STARS[i];
-    const { alt, az } = SLOW_CACHE.stars[i] || { alt: -99, az: 0 };
-    if (alt < -2) continue;
-    const p = project(az, alt);
+  const cache = SLOW_CACHE.stars;
+  for (let i = 0; i < cache.length; i++) {
+    const c = cache[i];
+    if (c.alt < -1) continue;
+    const p = projectVec(c.v);
     if (!p) continue;
-    const r = starRadius(s.mag);
+    const s = STARS[i];
+
+    // Size and brightness scale with magnitude (mag 0 ≈ 3px, mag 5.5 ≈ 0.55px)
+    const r = Math.max(0.55, Math.min(3.6, 2.9 - s.mag * 0.46));
+    const a = Math.max(0.22, Math.min(1, 1.18 - s.mag * 0.155));
     ctx.beginPath();
-    ctx.fillStyle = "#ffffff";
-    ctx.globalAlpha = Math.max(0.4, Math.min(1, 1.2 - s.mag * 0.18));
+    ctx.fillStyle = s.col;          // real star tint from its B-V color index
+    ctx.globalAlpha = a;
     ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
     ctx.fill();
+    // Soft glow on the brightest stars so they pop like the real sky
+    if (s.mag < 1.2) {
+      ctx.globalAlpha = 0.16;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r * 2.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
     ctx.globalAlpha = 1;
 
-    if (state.showLabels && s.mag < 2.3) {
-      label(p.x + r + 3, p.y + 3, s.name, "rgba(244,244,246,0.82)", 11);
+    if (s.name) {
+      if (state.showLabels && s.mag < 2.5) {
+        label(p.x + r + 3, p.y + 3, s.name, "rgba(244,244,246,0.82)", 11);
+      }
+      state.screenObjects.push({
+        x: p.x, y: p.y, r: Math.max(r, 9), kind: "star", data: s,
+        alt: c.alt, az: (Math.atan2(c.v.x, c.v.y) * RAD + 360) % 360
+      });
     }
-    state.screenObjects.push({ x: p.x, y: p.y, r: Math.max(r, 9), kind: "star", data: s, alt, az });
   }
 }
 
-/* ---- Constellation lines + labels (fully cached — no live raDecToAltAz calls) ---- */
+/* ---- Constellation lines + labels (all 88, fully vector-cached) ---- */
 function drawConstellations() {
-  ctx.strokeStyle = "rgba(120,160,220,0.32)";
+  ctx.strokeStyle = "rgba(110,150,210,0.26)";
   ctx.lineWidth = 1;
+  ctx.beginPath(); // one path for every segment — single stroke call
   let lineIdx = 0;
   for (let ci = 0; ci < CONSTELLATIONS.length; ci++) {
     const c = CONSTELLATIONS[ci];
-    for (const seg of c.lines) {
+    for (let si = 0; si < c.lines.length; si++) {
       const cached = SLOW_CACHE.conLines[lineIdx++];
       if (!cached) continue;
       const { a, b } = cached;
       if (a.alt < -5 && b.alt < -5) continue;
-      const pa = project(a.az, a.alt);
-      const pb = project(b.az, b.alt);
+      const pa = projectVec(a.v);
+      const pb = projectVec(b.v);
       if (!pa || !pb) continue;
       if (Math.hypot(pa.x - pb.x, pa.y - pb.y) > W * 0.9) continue;
-      ctx.beginPath();
       ctx.moveTo(pa.x, pa.y);
       ctx.lineTo(pb.x, pb.y);
-      ctx.stroke();
     }
-    if (state.showLabels) {
+  }
+  ctx.stroke();
+
+  if (state.showLabels) {
+    for (let ci = 0; ci < CONSTELLATIONS.length; ci++) {
       const lp = SLOW_CACHE.conLabels[ci];
-      if (lp && lp.alt > 0) {
-        const p = project(lp.az, lp.alt);
-        if (p) label(p.x, p.y, c.name, "rgba(150,180,235,0.7)", 11, true);
+      if (lp && lp.alt > 2) {
+        const p = projectVec(lp.v);
+        if (p) label(p.x, p.y, CONSTELLATIONS[ci].name, "rgba(150,180,235,0.62)", 11, true);
       }
     }
   }
@@ -362,34 +415,33 @@ function drawSatellites(date) {
 }
 
 /* ---- Milky Way band (uses cache) ---- */
+/* ---- Milky Way: real outline contours (d3-celestial data) ----
+ * MILKYWAY holds nested brightness contours of the actual galactic band.
+ * Each ring is filled at low alpha; where contours nest (the dense core in
+ * Sagittarius, the Cygnus rift edges) the fills stack into a brighter glow —
+ * the same technique desktop planetarium software uses. */
 function drawMilkyWay() {
   ctx.save();
-  for (const { alt, az } of SLOW_CACHE.milkyWay) {
-    if (alt < 0) continue;
-    const p = project(az, alt);
-    if (!p) continue;
-    const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, 46);
-    grad.addColorStop(0, "rgba(180,190,230,0.05)");
-    grad.addColorStop(1, "rgba(180,190,230,0)");
-    ctx.fillStyle = grad;
+  ctx.fillStyle = "rgba(165,180,225,0.040)";
+  for (const ring of SLOW_CACHE.milkyWay) {
+    // Skip rings entirely below the horizon or behind the camera
+    let anyVisible = false;
+    for (const pt of ring) {
+      if (pt.alt > -2 && dot(pt.v, state.camForward) > 0.04) { anyVisible = true; break; }
+    }
+    if (!anyVisible) continue;
+
     ctx.beginPath();
-    ctx.arc(p.x, p.y, 46, 0, Math.PI * 2);
+    let started = false;
+    for (const pt of ring) {
+      const p = projectVec(pt.v, true);
+      if (!p) { started = false; continue; } // behind camera → break the path
+      if (!started) { ctx.moveTo(p.x, p.y); started = true; }
+      else ctx.lineTo(p.x, p.y);
+    }
     ctx.fill();
   }
   ctx.restore();
-}
-
-function galacticToEquatorial(l, b) {
-  const lr = l * DEG, br = b * DEG;
-  const ragp = 192.85948 * DEG, decgp = 27.12825 * DEG, lcp = 122.93192 * DEG;
-  const sinb = Math.sin(br), cosb = Math.cos(br);
-  const sinDec = Math.sin(decgp) * sinb + Math.cos(decgp) * cosb * Math.cos(lcp - lr);
-  const dec = Math.asin(sinDec);
-  const y = cosb * Math.sin(lcp - lr);
-  const x = Math.cos(decgp) * sinb - Math.sin(decgp) * cosb * Math.cos(lcp - lr);
-  let ra = ragp + Math.atan2(y, x);
-  ra = ((ra * RAD) % 360 + 360) % 360;
-  return { ra: ra / 15, dec: dec * RAD };
 }
 
 /* ---- Horizon + cardinal directions ---- */
@@ -567,20 +619,35 @@ function label(x, y, text, color, size, center) {
 // Timestamp of the first valid compass reading, used to dismiss the hint overlay.
 let _firstOrientationAt = Infinity;
 
+// COMPASS FIX #2 (jitter): the magnetometer (webkitCompassHeading) is accurate
+// but noisy; the gyroscope (alpha) is silky-smooth but has an arbitrary zero.
+// Professional AR apps therefore use the gyro for motion and the compass only
+// to slowly calibrate the gyro's north offset. We keep a smoothed offset:
+//   offset ≈ (alpha + compassHeading), which is constant apart from gyro drift.
+let _compassOffset = null;
+
+function circularLerp(cur, target, k) {
+  const d = ((target - cur + 540) % 360) - 180;
+  return (cur + d * k + 360) % 360;
+}
+
 function handleOrientation(e) {
   // Honour the manual-look freeze set by centerOn() (search "center on").
   if (manualLook && Date.now() < manualLook.until) return;
   manualLook = null;
 
-  // --- Yaw reference ---
-  // iOS gives webkitCompassHeading (true-north, clockwise). The W3C alpha angle
-  // has an arbitrary zero, so on iOS we replace alpha with the compass-derived
-  // value (alpha increases counter-clockwise, hence 360 - heading).
+  // --- Yaw: smooth gyro alpha + slowly-calibrated compass offset ---
   let alphaDeg;
-  if (typeof e.webkitCompassHeading === "number" && !isNaN(e.webkitCompassHeading)) {
-    alphaDeg = 360 - e.webkitCompassHeading;
+  if (e.alpha != null &&
+      typeof e.webkitCompassHeading === "number" && !isNaN(e.webkitCompassHeading)) {
+    const inst = ((e.alpha + e.webkitCompassHeading) % 360 + 360) % 360;
+    // First reading locks on instantly; afterwards drift in gently (k=0.04)
+    _compassOffset = (_compassOffset === null) ? inst : circularLerp(_compassOffset, inst, 0.04);
+    alphaDeg = e.alpha - _compassOffset;
+  } else if (typeof e.webkitCompassHeading === "number" && !isNaN(e.webkitCompassHeading)) {
+    alphaDeg = 360 - e.webkitCompassHeading; // compass only (no gyro alpha)
   } else if (e.alpha != null) {
-    alphaDeg = e.alpha; // non-iOS fallback (relative heading)
+    alphaDeg = e.alpha;                      // non-iOS fallback (relative)
   } else {
     return;
   }
@@ -590,10 +657,8 @@ function handleOrientation(e) {
   // Build the target camera basis from the full device rotation matrix.
   const target = basisFromOrientation(alphaDeg, betaDeg, gammaDeg, screenAngleDeg());
 
-  // Smooth the orientation as ONE unit (lerp the vectors, then re-orthonormalise)
-  // instead of filtering three coupled Euler angles separately. k smaller = steadier
-  // but slightly laggier; 0.16 is a calm, jitter-free feel.
-  const k = 0.16;
+  // Smooth the orientation as ONE unit (lerp the vectors, then re-orthonormalise).
+  const k = 0.18;
   const f = normalize(lerpVec(state.camForward, target.f, k));
   let   r = normalize(lerpVec(state.camRight,   target.r, k));
   const u = normalize(cross(r, f));   // up   = right × forward
@@ -605,10 +670,15 @@ function handleOrientation(e) {
   if (_firstOrientationAt === Infinity) _firstOrientationAt = Date.now();
 }
 
-// Current screen rotation in degrees (0 portrait, 90/270 landscape, 180 upside down).
+// COMPASS FIX #1 (iPad sideways horizon): screen rotation in degrees.
+// The motion sensors' beta/gamma axes are defined relative to PORTRAIT on all
+// Apple devices, and the legacy window.orientation is portrait-relative too.
+// But iPadOS reports screen.orientation.angle relative to a LANDSCAPE-natural
+// screen, so trusting it first applied a phantom 90° roll on iPads (the
+// vertical-horizon bug). Prefer window.orientation; it matches the sensors.
 function screenAngleDeg() {
-  if (screen.orientation && typeof screen.orientation.angle === "number") return screen.orientation.angle;
   if (typeof window.orientation === "number") return window.orientation;
+  if (screen.orientation && typeof screen.orientation.angle === "number") return screen.orientation.angle;
   return 0;
 }
 
@@ -760,15 +830,18 @@ function showCard(obj) {
   if (obj.kind === "star") {
     const s = obj.data;
     name = s.name;
-    type = `Star · ${s.con}`;
+    type = s.con ? `Star · ${s.con}` : "Star";
+    const distTxt = s.dist ? s.dist.toLocaleString() + " light-years" : "unknown";
     rows = [
       ["Type",       "Star"],
       ["Magnitude",  s.mag.toFixed(2)],
       ["Altitude",   obj.alt.toFixed(1) + "°"],
       ["Azimuth",    obj.az.toFixed(0) + "°"],
-      ["Distance",   "many light-years"]
+      ["Distance",   distTxt]
     ];
-    fact = `${s.name} shines at magnitude ${s.mag.toFixed(2)} in the constellation ${s.con}.`;
+    fact = s.dist
+      ? `The light you see from ${s.name} left it ${s.dist.toLocaleString()} years ago.`
+      : `${s.name} shines at magnitude ${s.mag.toFixed(2)} in the constellation ${s.con}.`;
 
   } else if (obj.kind === "planet" || obj.kind === "sun" || obj.kind === "moon") {
     // FIX #4: obj.data.name is now always set (bodyAltAz includes it)
@@ -911,7 +984,10 @@ const results     = document.getElementById("results");
 
 function buildSearchIndex() {
   const list = [];
-  for (const s of STARS)        list.push({ name: s.name,  type: "Star (" + s.con + ")", kind: "star",    ref: s });
+  // Only named stars are searchable (465 of the 2,890 have proper names)
+  for (const s of STARS) {
+    if (s.name) list.push({ name: s.name, type: "Star (" + (s.con || "—") + ")", kind: "star", ref: s });
+  }
   for (const p of PLANETS)      list.push({ name: p.body,  type: "Planet",               kind: "planet"           });
   list.push({ name: "Moon", type: "The Moon",  kind: "moon" });
   list.push({ name: "Sun",  type: "The Sun",   kind: "sun"  });

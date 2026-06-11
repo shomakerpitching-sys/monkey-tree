@@ -2,7 +2,7 @@
  * Caches the app shell so the sky/planet/star features work offline.
  * (Live satellite passes still need a connection — that's expected.)
  */
-const CACHE = "monkey-tree-v6";
+const CACHE = "monkey-tree-v7";
 const ASSETS = [
   "./",
   "./index.html",
@@ -10,6 +10,7 @@ const ASSETS = [
   "./app.js",
   "./stars.js",
   "./constellations.js",
+  "./milkyway.js",
   "./manifest.webmanifest",
   "./splash.jpg",
   "./It_s_Kouri_Bitch.jpg",
