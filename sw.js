@@ -2,7 +2,7 @@
  * Caches the app shell so the sky/planet/star features work offline.
  * (Live satellite passes still need a connection — that's expected.)
  */
-const CACHE = "monkey-tree-v7";
+const CACHE = "monkey-tree-v8";
 const ASSETS = [
   "./",
   "./index.html",
@@ -44,7 +44,7 @@ self.addEventListener("fetch", (e) => {
   const url = req.url;
 
   // Never cache the live satellite data — always go to network.
-  if (url.includes("celestrak.org")) {
+  if (url.includes("tle.ivanstanojevic.me") || url.includes("celestrak.org")) {
     e.respondWith(fetch(req).catch(() => new Response("", { status: 504 })));
     return;
   }

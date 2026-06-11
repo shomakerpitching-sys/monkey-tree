@@ -14,9 +14,13 @@ const HOME = {
 };
 const GEOFENCE_M = 9.14; // 30 feet in meters
 
-// CelesTrak: free, no account, no API key. "visual" group = bright/famous satellites.
-const TLE_URL = "https://celestrak.org/NORAD/elements/gp.php?GROUP=visual&FORMAT=tle";
-const SAT_LIMIT = 60; // how many satellites to track from the visual list
+// TLE API (tle.ivanstanojevic.me): free, no account, no key — and unlike
+// CelesTrak it sends CORS headers, so browsers are actually allowed to fetch it.
+// (CelesTrak's endpoint has no Access-Control-Allow-Origin header, which made
+// the in-browser satellite fetch fail silently.) First page = the most popular
+// satellites: ISS, Tiangong, NOAA weather birds, etc.
+const TLE_URL = "https://tle.ivanstanojevic.me/api/tle/?page-size=100";
+const SAT_LIMIT = 60; // how many satellites to track
 
 const DEG = Math.PI / 180;
 const RAD = 180 / Math.PI;
@@ -761,43 +765,39 @@ function setStatus(isHome) {
 async function loadSatellites() {
   try {
     const res  = await fetch(TLE_URL, { cache: "no-store" });
-    const text = await res.text();
-    const sats = parseTLE(text, SAT_LIMIT);
+    if (!res.ok) throw new Error("TLE fetch " + res.status);
+    const json = await res.json();
+    const sats = parseTLEJson(json, SAT_LIMIT);
+    if (!sats.length) throw new Error("no TLEs parsed");
     state.satellites = sats;
-    localStorage.setItem("tleCache", JSON.stringify({ t: Date.now(), text }));
+    localStorage.setItem("tleCacheV2", JSON.stringify({ t: Date.now(), json }));
   } catch (e) {
-    // Offline: use cached TLEs
-    const cached = localStorage.getItem("tleCache");
+    // Offline (or API down): use the last successful fetch
+    const cached = localStorage.getItem("tleCacheV2");
     if (cached) {
       try {
-        const text = JSON.parse(cached).text;
-        state.satellites = parseTLE(text, SAT_LIMIT);
+        state.satellites = parseTLEJson(JSON.parse(cached).json, SAT_LIMIT);
       } catch (e2) {}
     }
   }
 }
 
-function parseTLE(text, limit) {
-  const lines = text.trim().split(/\r?\n/);
+// TLE API returns JSON: { member: [{ name, line1, line2, ... }, ...] }
+function parseTLEJson(json, limit) {
   const sats = [];
-  for (let i = 0; i + 2 < lines.length; i += 3) {
-    const name = lines[i].trim();
-    const l1 = lines[i + 1];
-    const l2 = lines[i + 2];
-    if (!l1 || !l2 || l1[0] !== "1") continue;
+  for (const m of (json.member || [])) {
+    if (!m.line1 || !m.line2) continue;
     try {
-      sats.push({ name, satrec: satellite.twoline2satrec(l1, l2) });
-    } catch (e) {}
+      sats.push({ name: m.name, satrec: satellite.twoline2satrec(m.line1, m.line2) });
+    } catch (e) { /* skip bad TLE */ }
     if (sats.length >= limit) break;
   }
   // Guarantee the ISS is included even if the limit was hit before it appeared
   if (!sats.some(s => /ISS|ZARYA/i.test(s.name))) {
-    const idx = lines.findIndex(l => /ISS|ZARYA/i.test(l));
-    if (idx >= 0 && lines[idx+1] && lines[idx+2]) {
-      try {
-        sats.push({ name: lines[idx].trim(),
-          satrec: satellite.twoline2satrec(lines[idx+1], lines[idx+2]) });
-      } catch (e) {}
+    const iss = (json.member || []).find(m => /ISS|ZARYA/i.test(m.name));
+    if (iss) {
+      try { sats.push({ name: iss.name, satrec: satellite.twoline2satrec(iss.line1, iss.line2) }); }
+      catch (e) {}
     }
   }
   return sats;
