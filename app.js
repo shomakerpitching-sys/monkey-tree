@@ -216,7 +216,13 @@ function scaleVec(a, s){ return { x: a.x*s, y: a.y*s, z: a.z*s }; }
 function lerpVec(a, b, k){ return { x: a.x+(b.x-a.x)*k, y: a.y+(b.y-a.y)*k, z: a.z+(b.z-a.z)*k }; }
 
 /* ===================== RENDER ===================== */
+let _lastFrameAt = 0;
 function render() {
+  const now = performance.now();
+  const dt = Math.min(0.1, _lastFrameAt ? (now - _lastFrameAt) / 1000 : 0.016);
+  _lastFrameAt = now;
+  applySmoothing(dt); // pull the camera toward the latest sensor reading
+
   const date = currentDate();
   ctx.clearRect(0, 0, W, H);
 
@@ -448,24 +454,23 @@ function drawMilkyWay() {
   ctx.restore();
 }
 
-/* ---- Horizon + cardinal directions ---- */
+/* ---- Horizon + cardinal directions (precomputed vectors) ---- */
 function drawHorizon() {
   ctx.strokeStyle = "rgba(120,140,170,0.35)";
   ctx.lineWidth = 1;
   ctx.beginPath();
   let started = false;
-  for (let az = 0; az <= 360; az += 2) {
-    const p = project(az, 0, true); // allowOffscreen → continuous line at edges
+  for (const v of HORIZON_PTS) {
+    const p = projectVec(v, true); // allowOffscreen → continuous line at edges
     if (!p) { started = false; continue; }
     if (!started) { ctx.moveTo(p.x, p.y); started = true; }
     else ctx.lineTo(p.x, p.y);
   }
   ctx.stroke();
 
-  const dirs = [["N",0],["E",90],["S",180],["W",270],["NE",45],["SE",135],["SW",225],["NW",315]];
-  for (const [name, az] of dirs) {
-    const p = project(az, 0);
-    if (p) label(p.x, p.y - 4, name, "rgba(150,170,200,0.8)", 12, true);
+  for (const c of CARDINALS) {
+    const p = projectVec(c.v);
+    if (p) label(p.x, p.y - 4, c.name, "rgba(150,170,200,0.8)", 12, true);
   }
 }
 
@@ -477,53 +482,92 @@ function drawHorizon() {
  */
 const EAST_AZ = 90; // the balcony faces due east
 
-// Silhouette top altitude (degrees) for a given azimuth.
+/* ---- The REAL balcony photo, world-anchored at east ----
+ * balcony.webp is the actual 9pm photo from the balcony (IMG_0265), night-graded,
+ * with the sky cut to transparency above the far-shore treeline. It is rendered
+ * as a cylindrical billboard: vertical strips pinned to fixed azimuth/altitude,
+ * so the trees, marina and railing stay glued to their true compass positions
+ * while the live stars rise through the transparent sky above them. */
+const BALCONY = { az0: 52, az1: 128, altTop: 26, altBot: -30, strips: 14 };
+const balconyImg = new Image();
+let balconyReady = false;
+balconyImg.onload = () => { balconyReady = true; };
+balconyImg.src = "balcony.webp";
+
+// Generic gentle treeline for every direction outside the photo span.
 function horizonTopAlt(az) {
-  // Gentle generic treeline everywhere (≈1.5°–3.5°, slowly undulating).
-  const generic = 2.5 + 1.1 * Math.sin(az * DEG * 3 + 0.7);
-
-  // Distance from due east, wrapped to [-180,180].
-  let d = ((az - EAST_AZ + 540) % 360) - 180;
-  const ad = Math.abs(d);
-  if (ad > 60) return generic; // outside the east view → just the generic ridge
-
-  // The real view: tall trees on both sides, low far-shore treeline in the gap.
-  let treeTop;
-  if (ad < 12) {
-    treeTop = 4.5 + 1.5 * Math.cos(d * DEG * 6);        // central gap over the water
-  } else if (ad < 50) {
-    const t = (ad - 12) / 38;                            // 0→1 across the tree mass
-    treeTop = 5 + 27 * Math.sin(Math.min(1, t) * Math.PI * 0.92); // rises to ~30°
-  } else {
-    treeTop = 6;
-  }
-
-  // Blend the tree mass back into the generic ridge between 45°–60° off east.
-  if (ad > 45) {
-    const bld = (ad - 45) / 15;
-    return treeTop * (1 - bld) + generic * bld;
-  }
-  return Math.max(treeTop, generic);
+  return 2.5 + 1.1 * Math.sin(az * DEG * 3 + 0.7);
 }
+
+// True if an azimuth falls inside the photo's span (so the procedural
+// silhouette must not double-draw behind the photo's transparent sky).
+function inBalconySpan(az) {
+  const d = ((az - EAST_AZ + 540) % 360) - 180;
+  return Math.abs(d) <= (BALCONY.az1 - BALCONY.az0) / 2;
+}
+
+/* ---- Precomputed static world geometry ----
+ * The silhouette ridge, horizon glow, horizon line, cardinal points and the
+ * photo strip corners NEVER move in world space. They used to be re-derived
+ * with ~1,500 trig-heavy project(az,alt) calls per frame — a real cause of
+ * dropped frames on the phone. Now each is a unit vector computed once at
+ * startup; per frame they cost three dot products through projectVec(). */
+function vecAA(az, alt) {
+  const a = az * DEG, e = alt * DEG, c = Math.cos(e);
+  return { x: c * Math.sin(a), y: c * Math.cos(a), z: Math.sin(e) };
+}
+const FG_STEP = 1.5;
+const FG_COLS = [];      // silhouette columns (skipping the photo span)
+const GLOW_COLS = [];    // horizon glow columns
+const HORIZON_PTS = [];  // horizon line points
+const CARDINALS = [];    // compass letters
+const BAL_STRIPS = [];   // photo strip corner vectors + source x ranges
+(function precomputeStatics() {
+  for (let az = 0; az < 360; az += FG_STEP) {
+    FG_COLS.push({
+      skip: inBalconySpan(az) || inBalconySpan(az + FG_STEP),
+      tl: vecAA(az, horizonTopAlt(az)), tr: vecAA(az + FG_STEP, horizonTopAlt(az + FG_STEP)),
+      bl: vecAA(az, -25), br: vecAA(az + FG_STEP, -25)
+    });
+  }
+  for (let az = 0; az < 360; az += 3) {
+    const d = ((az - EAST_AZ + 540) % 360) - 180;
+    const warm = Math.max(0, 1 - Math.abs(d) / 70);
+    GLOW_COLS.push({
+      warm,
+      tl: vecAA(az, 14), tr: vecAA(az + 3, 14),
+      bl: vecAA(az, -2), br: vecAA(az + 3, -2)
+    });
+  }
+  for (let az = 0; az <= 360; az += 2) HORIZON_PTS.push(vecAA(az, 0));
+  for (const [name, az] of [["N",0],["E",90],["S",180],["W",270],["NE",45],["SE",135],["SW",225],["NW",315]]) {
+    CARDINALS.push({ name, v: vecAA(az, 0) });
+  }
+  const { az0, az1, altTop, altBot, strips } = BALCONY;
+  for (let i = 0; i < strips; i++) {
+    const a0 = az0 + (az1 - az0) * i / strips;
+    const a1 = az0 + (az1 - az0) * (i + 1) / strips;
+    BAL_STRIPS.push({
+      u0: i / strips, u1: (i + 1) / strips,
+      tl: vecAA(a0, altTop), tr: vecAA(a1, altTop), bl: vecAA(a0, altBot)
+    });
+  }
+})();
 
 // Soft glow hugging the horizon: dim & cool most places, warmer toward the east
 // (the marina's lights). Drawn before the stars so the dark trees sit against it.
 function drawHorizonGlow() {
-  const step = 3;
-  for (let az = 0; az < 360; az += step) {
-    const top  = project(az,        14, true);
-    const top2 = project(az + step, 14, true);
-    const bot  = project(az,        -2, true);
-    const bot2 = project(az + step, -2, true);
+  for (const col of GLOW_COLS) {
+    const top  = projectVec(col.tl, true);
+    const top2 = projectVec(col.tr, true);
+    const bot  = projectVec(col.bl, true);
+    const bot2 = projectVec(col.br, true);
     if (!top || !top2 || !bot || !bot2) continue;
-
-    let d = ((az - EAST_AZ + 540) % 360) - 180;
-    const warm = Math.max(0, 1 - Math.abs(d) / 70); // 1 at east → 0 by 70° away
+    const warm = col.warm;
     const r = Math.round(58 + warm * 46);
     const g = Math.round(68 + warm * 22);
     const b = Math.round(96 - warm * 34);
     const aHor = (0.24 + warm * 0.12).toFixed(3);
-
     const grad = ctx.createLinearGradient(bot.x, bot.y, top.x, top.y);
     grad.addColorStop(0, `rgba(${r},${g},${b},${aHor})`);
     grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
@@ -539,15 +583,15 @@ function drawHorizonGlow() {
 }
 
 function drawForeground() {
-  // --- World-locked tree silhouette (pure near-black against the horizon glow) ---
-  const step = 1.5;
+  // --- Generic dark treeline everywhere EXCEPT under the photo ---
   ctx.fillStyle = "#020308";
-  for (let az = 0; az < 360; az += step) {
-    const pTL = project(az,        horizonTopAlt(az),        true);
-    const pTR = project(az + step, horizonTopAlt(az + step), true);
-    const pBL = project(az,        -25, true);
-    const pBR = project(az + step, -25, true);
-    if (!pTL || !pTR || !pBL || !pBR) continue; // column behind camera → skip
+  for (const col of FG_COLS) {
+    if (col.skip && balconyReady) continue; // photo owns this span
+    const pTL = projectVec(col.tl, true);
+    const pTR = projectVec(col.tr, true);
+    const pBL = projectVec(col.bl, true);
+    const pBR = projectVec(col.br, true);
+    if (!pTL || !pTR || !pBL || !pBR) continue;
     ctx.beginPath();
     ctx.moveTo(pTL.x, pTL.y);
     ctx.lineTo(pTR.x, pTR.y);
@@ -557,20 +601,29 @@ function drawForeground() {
     ctx.fill();
   }
 
-  // Faint rim along the treeline top so the edge stays crisp against the glow.
-  ctx.strokeStyle = "rgba(90,110,140,0.30)";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  let started = false;
-  for (let az = 0; az <= 360; az += step) {
-    const p = project(az, horizonTopAlt(az), true);
-    if (!p) { started = false; continue; }
-    if (!started) { ctx.moveTo(p.x, p.y); started = true; }
-    else ctx.lineTo(p.x, p.y);
-  }
-  ctx.stroke();
-
+  drawBalcony();
   drawRailing();
+}
+
+/* ---- The photo itself: cylindrical strip billboard ---- */
+function drawBalcony() {
+  if (!balconyReady) return;
+  const iw = balconyImg.naturalWidth, ih = balconyImg.naturalHeight;
+  for (const s of BAL_STRIPS) {
+    const pTL = projectVec(s.tl, true);
+    const pTR = projectVec(s.tr, true);
+    const pBL = projectVec(s.bl, true);
+    if (!pTL || !pTR || !pBL) continue; // strip behind the camera
+    const sx = s.u0 * iw, sw = (s.u1 - s.u0) * iw;
+    // Affine map: image-pixel coords -> screen (composed with the DPR base scale)
+    const m11 = (pTR.x - pTL.x) / sw, m12 = (pTR.y - pTL.y) / sw;
+    const m21 = (pBL.x - pTL.x) / ih, m22 = (pBL.y - pTL.y) / ih;
+    const dx = pTL.x - m11 * sx, dy = pTL.y - m12 * sx;
+    ctx.setTransform(DPR * m11, DPR * m12, DPR * m21, DPR * m22, DPR * dx, DPR * dy);
+    // 0.75px source overlap hides the seam between adjacent strips
+    ctx.drawImage(balconyImg, sx, 0, sw + 0.75, ih, sx, 0, sw + 0.75, ih);
+  }
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0); // restore the base transform
 }
 
 // Screen-locked lit railing along the bottom — fades out as you look upward.
@@ -658,20 +711,38 @@ function handleOrientation(e) {
   const betaDeg  = e.beta  || 0;
   const gammaDeg = e.gamma || 0;
 
-  // Build the target camera basis from the full device rotation matrix.
-  const target = basisFromOrientation(alphaDeg, betaDeg, gammaDeg, screenAngleDeg());
+  // Just record the raw target — the render loop owns the smoothing.
+  // (Smoothing per-event with a fixed factor was frame-rate dependent: laggy
+  // during fast sweeps, shimmery at rest. The render loop now applies a
+  // time-based adaptive filter instead — see applySmoothing().)
+  targetBasis = basisFromOrientation(alphaDeg, betaDeg, gammaDeg, screenAngleDeg());
 
-  // Smooth the orientation as ONE unit (lerp the vectors, then re-orthonormalise).
-  const k = 0.18;
-  const f = normalize(lerpVec(state.camForward, target.f, k));
-  let   r = normalize(lerpVec(state.camRight,   target.r, k));
+  if (_firstOrientationAt === Infinity) _firstOrientationAt = Date.now();
+}
+
+// Smoothly pull the camera toward the latest sensor reading, called once per
+// rendered frame. The smoothing constant adapts to how far we are from the
+// target: big sweep → snappy (rate up to ~28/s, barely any lag); holding
+// still → heavy damping (rate ~5/s) so sensor tremor never reaches the screen.
+// Time-based (dt) so it behaves the same at 30, 60 or 120 fps.
+let targetBasis = null;
+function applySmoothing(dt) {
+  if (!targetBasis) return;
+  const t = targetBasis;
+  const errDot = Math.max(-1, Math.min(1, dot(state.camForward, t.f)));
+  const errDeg = Math.acos(errDot) * RAD;
+  if (errDeg < 0.04 && Math.acos(Math.max(-1, Math.min(1, dot(state.camUp, t.u)))) * RAD < 0.04) {
+    return; // deadband: target reached — stop drifting, kill micro-shimmer
+  }
+  const rate = 5 + Math.min(23, errDeg * 1.6); // adaptive responsiveness
+  const k = 1 - Math.exp(-rate * dt);
+  const f = normalize(lerpVec(state.camForward, t.f, k));
+  let   r = normalize(lerpVec(state.camRight,   t.r, k));
   const u = normalize(cross(r, f));   // up   = right × forward
   r       = normalize(cross(f, u));   // right = forward × up (re-orthogonalise)
   state.camForward = f;
   state.camRight   = r;
   state.camUp      = u;
-
-  if (_firstOrientationAt === Infinity) _firstOrientationAt = Date.now();
 }
 
 // COMPASS FIX #1 (iPad sideways horizon): screen rotation in degrees.
@@ -1076,6 +1147,7 @@ function centerOn(m) {
 
   // Set the freeze window; handleOrientation() will respect it, then point the camera.
   manualLook = { az: altaz.az, alt: altaz.alt, until: Date.now() + 6000 };
+  targetBasis = null; // drop the stale sensor target so smoothing doesn't pull us back
   setLookDirection(altaz.az, altaz.alt);
 }
 
